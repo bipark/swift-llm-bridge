@@ -215,7 +215,7 @@ print("Current response: \(bridge.currentResponse)")
 
 ## Recent Updates
 
-### Version 1.1.0
+### Version 1.0.0
 - ✅ Enhanced SSE (Server-Sent Events) handling for LMStudio
 - ✅ Improved stream processing with better error handling
 - ✅ Added debug logging for troubleshooting connection issues
