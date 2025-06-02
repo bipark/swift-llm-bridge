@@ -1,18 +1,20 @@
 # Swift LLM Bridge
 
-A Swift package for iOS and macOS that connects to Ollama and LMStudio servers for interactive AI model conversations.
+A Swift package for iOS and macOS that connects to Ollama, LMStudio, and Claude servers for interactive AI model conversations.
 
 ## Features
 
 - ✅ Ollama server support
 - ✅ LMStudio server support  
+- ✅ Claude API support (Anthropic)
 - ✅ Real-time streaming responses
-- ✅ Image input support (Ollama)
+- ✅ Image input support (Ollama & Claude)
 - ✅ Conversation history management
 - ✅ iOS/macOS cross-platform support
 - ✅ SwiftUI ObservableObject support
 - ✅ Enhanced SSE (Server-Sent Events) handling
 - ✅ Debug logging for troubleshooting
+- ✅ API key authentication (Claude)
 
 ## Installation
 
@@ -46,10 +48,17 @@ let lmStudioBridge = LLMBridge(
     port: 1234, 
     target: .lmstudio
 )
+
+// Connect to Claude API
+let claudeBridge = LLMBridge(
+    target: .claude, 
+    apiKey: "your-claude-api-key"
+)
 ```
 
 ### Getting Available Models
 
+#### Ollama & LMStudio
 ```swift
 do {
     let models = try await bridge.getAvailableModels()
@@ -59,9 +68,22 @@ do {
 }
 ```
 
+#### Claude
+```swift
+do {
+    let models = try await claudeBridge.getAvailableModels()
+    print("Claude models: \(models)")
+    // Output: ["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229"]
+} catch {
+    print("Failed to fetch Claude models: \(error)")
+}
+```
+
 ### Sending Messages
 
+#### Basic Text Messages
 ```swift
+// Ollama/LMStudio
 do {
     let response = try await bridge.sendMessage(
         content: "Hello! How can you help me?",
@@ -71,10 +93,22 @@ do {
 } catch {
     print("Failed to send message: \(error)")
 }
+
+// Claude
+do {
+    let response = try await claudeBridge.sendMessage(
+        content: "Hello! How can you help me?",
+        model: "claude-3-5-sonnet-20241022"
+    )
+    print("Claude response: \(response.content)")
+} catch {
+    print("Failed to send message: \(error)")
+}
 ```
 
-### Sending Messages with Images (iOS)
+### Sending Messages with Images
 
+#### Ollama (with vision models like llava)
 ```swift
 #if canImport(UIKit)
 import UIKit
@@ -93,6 +127,25 @@ do {
 #endif
 ```
 
+#### Claude (supports vision across all models)
+```swift
+#if canImport(UIKit)
+import UIKit
+
+let image = UIImage(named: "example")
+do {
+    let response = try await claudeBridge.sendMessage(
+        content: "Please analyze this image in detail",
+        image: image,
+        model: "claude-3-5-sonnet-20241022"
+    )
+    print("Claude analysis: \(response.content)")
+} catch {
+    print("Failed to send message: \(error)")
+}
+#endif
+```
+
 ### Using with SwiftUI
 
 ```swift
@@ -102,9 +155,27 @@ import swift_llm_bridge
 struct ChatView: View {
     @StateObject private var bridge = LLMBridge()
     @State private var inputText = ""
+    @State private var selectedTarget: LLMTarget = .ollama
+    @State private var apiKey = ""
     
     var body: some View {
         VStack {
+            // Target selection
+            Picker("Select LLM", selection: $selectedTarget) {
+                Text("Ollama").tag(LLMTarget.ollama)
+                Text("LMStudio").tag(LLMTarget.lmstudio)
+                Text("Claude").tag(LLMTarget.claude)
+            }
+            .pickerStyle(SegmentedPickerStyle())
+            .padding()
+            
+            // API Key input for Claude
+            if selectedTarget == .claude {
+                SecureField("Claude API Key", text: $apiKey)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                    .padding(.horizontal)
+            }
+            
             ScrollView {
                 LazyVStack {
                     ForEach(bridge.messages) { message in
@@ -117,18 +188,36 @@ struct ChatView: View {
                 ProgressView("Generating response...")
             }
             
+            if let error = bridge.errorMessage {
+                Text("Error: \(error)")
+                    .foregroundColor(.red)
+                    .padding()
+            }
+            
             HStack {
                 TextField("Enter your message...", text: $inputText)
                 
                 Button("Send") {
                     Task {
-                        try? await bridge.sendMessage(content: inputText)
+                        let currentBridge = createBridge()
+                        try? await currentBridge.sendMessage(content: inputText)
                         inputText = ""
                     }
                 }
-                .disabled(inputText.isEmpty || bridge.isLoading)
+                .disabled(inputText.isEmpty || bridge.isLoading || (selectedTarget == .claude && apiKey.isEmpty))
             }
             .padding()
+        }
+    }
+    
+    private func createBridge() -> LLMBridge {
+        switch selectedTarget {
+        case .ollama:
+            return LLMBridge(target: .ollama)
+        case .lmstudio:
+            return LLMBridge(baseURL: "http://localhost", port: 1234, target: .lmstudio)
+        case .claude:
+            return LLMBridge(target: .claude, apiKey: apiKey)
         }
     }
 }
@@ -140,16 +229,35 @@ struct MessageView: View {
         HStack {
             if message.isUser {
                 Spacer()
-                Text(message.content)
-                    .padding()
-                    .background(Color.blue)
-                    .foregroundColor(.white)
-                    .cornerRadius(8)
+                VStack(alignment: .trailing) {
+                    if let image = message.image {
+                        #if canImport(UIKit)
+                        Image(uiImage: image)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(maxWidth: 200, maxHeight: 200)
+                            .cornerRadius(8)
+                        #elseif canImport(AppKit)
+                        Image(nsImage: image)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(maxWidth: 200, maxHeight: 200)
+                            .cornerRadius(8)
+                        #endif
+                    }
+                    Text(message.content)
+                        .padding()
+                        .background(Color.blue)
+                        .foregroundColor(.white)
+                        .cornerRadius(8)
+                }
             } else {
-                Text(message.content)
-                    .padding()
-                    .background(Color.gray.opacity(0.2))
-                    .cornerRadius(8)
+                VStack(alignment: .leading) {
+                    Text(message.content)
+                        .padding()
+                        .background(Color.gray.opacity(0.2))
+                        .cornerRadius(8)
+                }
                 Spacer()
             }
         }
@@ -166,6 +274,14 @@ let newBridge = bridge.createNewSession(
     baseURL: "http://192.168.1.100",
     port: 11434,
     target: .ollama
+)
+
+// Create Claude session with API key
+let claudeSession = bridge.createNewSession(
+    baseURL: "",
+    port: 0,
+    target: .claude,
+    apiKey: "your-api-key"
 )
 ```
 
@@ -187,14 +303,15 @@ print("Current response: \(bridge.currentResponse)")
 ### LLMBridge Class
 
 #### Initialization
-- `init(baseURL: String, port: Int, target: LLMTarget)`
+- `init(baseURL: String, port: Int, target: LLMTarget, apiKey: String?)`: Initialize with custom configuration
+- For Claude: `LLMBridge(target: .claude, apiKey: "your-api-key")`
 
 #### Main Methods
 - `getAvailableModels() async throws -> [String]`: Returns available model list
 - `sendMessage(content: String, image: PlatformImage?, model: String?) async throws -> Message`: Send message
 - `cancelGeneration()`: Cancel current response generation
 - `clearMessages()`: Clear message history
-- `createNewSession(baseURL: String, port: Int, target: LLMTarget) -> LLMBridge`: Create new session with different configuration
+- `createNewSession(baseURL: String, port: Int, target: LLMTarget, apiKey: String?) -> LLMBridge`: Create new session
 
 #### Published Properties
 - `messages: [Message]`: Array of conversation messages
@@ -205,6 +322,7 @@ print("Current response: \(bridge.currentResponse)")
 ### LLMTarget Enumeration
 - `.ollama`: Ollama server
 - `.lmstudio`: LMStudio server
+- `.claude`: Claude API (Anthropic)
 
 ### Message Structure
 - `id: UUID`: Unique identifier
@@ -213,7 +331,53 @@ print("Current response: \(bridge.currentResponse)")
 - `timestamp: Date`: Creation time
 - `image: PlatformImage?`: Attached image
 
+## Platform-Specific Features
+
+### Claude API
+- **Models**: claude-3-5-sonnet-20241022, claude-3-5-haiku-20241022, claude-3-opus-20240229
+- **Authentication**: Requires API key from Anthropic
+- **Vision**: All models support image analysis
+- **Streaming**: Real-time response streaming
+- **Rate Limits**: Follows Anthropic's API rate limits
+
+### Ollama
+- **Models**: User-installed local models
+- **Vision**: Requires vision-capable models (e.g., llava)
+- **Local**: Runs on local machine
+- **No API Key**: No authentication required
+
+### LMStudio
+- **Models**: User-loaded models
+- **Local**: Runs on local machine
+- **OpenAI Compatible**: Uses OpenAI-style API format
+- **No API Key**: No authentication required
+
+## Error Handling
+
+```swift
+do {
+    let response = try await bridge.sendMessage(content: "Hello")
+} catch {
+    switch error {
+    case let nsError as NSError where nsError.domain == "LLMBridgeError":
+        if nsError.code == 401 {
+            print("Authentication error: Check your API key")
+        }
+    default:
+        print("Network or other error: \(error.localizedDescription)")
+    }
+}
+```
+
 ## Recent Updates
+
+### Version 1.1.0
+- ✅ **Claude API Integration**: Full support for Anthropic's Claude models
+- ✅ **API Key Authentication**: Secure API key handling for Claude
+- ✅ **Enhanced Vision Support**: Image analysis with both Ollama and Claude
+- ✅ **Multi-Platform Targeting**: Seamless switching between Ollama, LMStudio, and Claude
+- ✅ **Improved Error Handling**: Better error messages and authentication validation
+- ✅ **Updated Tests**: Comprehensive test coverage for all three platforms
 
 ### Version 1.0.0
 - ✅ Enhanced SSE (Server-Sent Events) handling for LMStudio
@@ -236,6 +400,15 @@ When troubleshooting connection issues, the library now provides detailed consol
 - iOS 15.0+ / macOS 12.0+
 - Swift 6.1+
 - Xcode 15.0+
+- For Claude: Valid Anthropic API key
+
+## Getting Claude API Key
+
+1. Visit [Anthropic Console](https://console.anthropic.com/)
+2. Create an account or sign in
+3. Navigate to API Keys section
+4. Generate a new API key
+5. Keep your API key secure and never commit it to version control
 
 ## License
 

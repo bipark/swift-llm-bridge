@@ -37,6 +37,47 @@ import Testing
     }
 }
 
+@available(iOS 15.0, macOS 12.0, *)
+@Test func testClaudeInitialization() async throws {
+    let claudeBridge = await LLMBridge(target: .claude, apiKey: "test-api-key")
+    
+    await MainActor.run {
+        #expect(claudeBridge.getPort() == 443)
+        #expect(claudeBridge.getTarget() == .claude)
+        #expect(claudeBridge.getBaseURL().absoluteString == "https://api.anthropic.com")
+    }
+}
+
+@available(iOS 15.0, macOS 12.0, *)
+@Test func testClaudeWithoutAPIKey() async throws {
+    let claudeBridge = await LLMBridge(target: .claude)
+    
+    await MainActor.run {
+        #expect(claudeBridge.getTarget() == .claude)
+    }
+    
+    do {
+        _ = try await claudeBridge.getAvailableModels()
+        #expect(Bool(false), "Should throw error without API key")
+    } catch {
+        #expect(error.localizedDescription.contains("Claude API key is required"))
+    }
+}
+
+@available(iOS 15.0, macOS 12.0, *)
+@Test func testClaudeModels() async throws {
+    let claudeBridge = await LLMBridge(target: .claude, apiKey: "test-api-key")
+    
+    do {
+        let models = try await claudeBridge.getAvailableModels()
+        #expect(models.contains("claude-3-5-sonnet-20241022"))
+        #expect(models.contains("claude-3-5-haiku-20241022"))
+        #expect(models.contains("claude-3-opus-20240229"))
+    } catch {
+        print("Expected error for invalid API key: \(error)")
+    }
+}
+
 @Test func testMessageCreation() async throws {
     let message = LLMBridge.Message(content: "Test message", isUser: true)
     
@@ -59,5 +100,29 @@ import Testing
         
         #expect(bridge.messages.count == 0)
         #expect(bridge.errorMessage == nil)
+    }
+}
+
+@available(iOS 15.0, macOS 12.0, *)
+@Test func testLLMTargetEnum() async throws {
+    #expect(LLMTarget.ollama == .ollama)
+    #expect(LLMTarget.lmstudio == .lmstudio)
+    #expect(LLMTarget.claude == .claude)
+}
+
+@available(iOS 15.0, macOS 12.0, *)
+@Test func testCreateNewSessionWithAPIKey() async throws {
+    let bridge = await LLMBridge()
+    
+    let claudeBridge = await bridge.createNewSession(
+        baseURL: "https://api.anthropic.com", 
+        port: 443, 
+        target: .claude, 
+        apiKey: "test-key"
+    )
+    
+    await MainActor.run {
+        #expect(claudeBridge.getTarget() == .claude)
+        #expect(claudeBridge.getPort() == 443)
     }
 }

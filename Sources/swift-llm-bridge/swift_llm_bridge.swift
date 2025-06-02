@@ -19,6 +19,7 @@ public typealias PlatformImage = NSImage
 public enum LLMTarget: Sendable {
     case ollama
     case lmstudio
+    case claude
 }
 
 @available(iOS 15.0, macOS 12.0, *)
@@ -52,9 +53,21 @@ public class LLMBridge: ObservableObject {
     private let baseURL: URL
     private let port: Int
     private let target: LLMTarget
+    private let apiKey: String?
     private var generationTask: Task<Void, Never>?
     private let defaultModel = "llama3.2"
     private var tempResponse: String = ""
+    
+    private var getDefaultModel: String {
+        switch target {
+        case .ollama:
+            return "llama3.2"
+        case .lmstudio:
+            return "llama3.2"
+        case .claude:
+            return "claude-3-5-sonnet-20241022"
+        }
+    }
     
     private let urlSession: URLSession = {
         let configuration = URLSessionConfiguration.default
@@ -69,17 +82,26 @@ public class LLMBridge: ObservableObject {
         return URLSession(configuration: configuration)
     }()
     
-    public init(baseURL: String = "http://localhost", port: Int = 11434, target: LLMTarget = .ollama) {
-        guard let url = URL(string: "\(baseURL):\(port)") else {
-            fatalError("Invalid base URL")
+    public init(baseURL: String = "http://localhost", port: Int = 11434, target: LLMTarget = .ollama, apiKey: String? = nil) {
+        if target == .claude {
+            guard let url = URL(string: "https://api.anthropic.com") else {
+                fatalError("Invalid Claude API URL")
+            }
+            self.baseURL = url
+            self.port = 443
+        } else {
+            guard let url = URL(string: "\(baseURL):\(port)") else {
+                fatalError("Invalid base URL")
+            }
+            self.baseURL = url
+            self.port = port
         }
-        self.baseURL = url
-        self.port = port
         self.target = target
+        self.apiKey = apiKey
     }
     
-    public func createNewSession(baseURL: String, port: Int, target: LLMTarget) -> LLMBridge {
-        return LLMBridge(baseURL: baseURL, port: port, target: target)
+    public func createNewSession(baseURL: String, port: Int, target: LLMTarget, apiKey: String? = nil) -> LLMBridge {
+        return LLMBridge(baseURL: baseURL, port: port, target: target, apiKey: apiKey)
     }
     
     public func getAvailableModels() async throws -> [String] {
@@ -87,7 +109,18 @@ public class LLMBridge: ObservableObject {
         let requestURL = baseURL.appendingPathComponent(endpoint)
         
         do {
-            let (data, _) = try await urlSession.data(from: requestURL)
+            var request = URLRequest(url: requestURL)
+            
+            if target == .claude {
+                guard let key = apiKey else {
+                    throw NSError(domain: "LLMBridgeError", code: 401, userInfo: [NSLocalizedDescriptionKey: "Claude API key is required"])
+                }
+                request.addValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+                request.addValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+                request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+            }
+            
+            let (data, _) = try await urlSession.data(for: request)
             
             switch target {
             case .ollama:
@@ -100,9 +133,11 @@ public class LLMBridge: ObservableObject {
                    let data = json["data"] as? [[String: Any]] {
                     return data.compactMap { $0["id"] as? String }
                 }
+            case .claude:
+                return ["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229"]
             }
             
-            return [defaultModel]
+            return [getDefaultModel]
             
         } catch {
             errorMessage = "Failed to fetch model list: \(error.localizedDescription)"
@@ -122,7 +157,7 @@ public class LLMBridge: ObservableObject {
         generationTask?.cancel()
         
         var aiMessage: Message?
-        let selectedModel = model ?? defaultModel
+        let selectedModel = model ?? getDefaultModel
         
         generationTask = Task {
             defer { isLoading = false }
@@ -139,6 +174,15 @@ public class LLMBridge: ObservableObject {
                     request.addValue("keep-alive", forHTTPHeaderField: "Connection")
                 } else {
                     request.addValue("application/json", forHTTPHeaderField: "Accept")
+                }
+                
+                if target == .claude {
+                    guard let key = apiKey else {
+                        throw NSError(domain: "LLMBridgeError", code: 401, userInfo: [NSLocalizedDescriptionKey: "Claude API key is required"])
+                    }
+                    request.addValue("\(key)", forHTTPHeaderField: "x-api-key")
+                    request.addValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+                    request.addValue("text/event-stream", forHTTPHeaderField: "Accept")
                 }
                 
                 request.addValue("no-cache", forHTTPHeaderField: "Cache-Control")
@@ -206,6 +250,8 @@ public class LLMBridge: ObservableObject {
             return "api/tags"
         case .lmstudio:
             return "v1/models"
+        case .claude:
+            return "v1/models"
         }
     }
     
@@ -215,6 +261,8 @@ public class LLMBridge: ObservableObject {
             return "api/chat"
         case .lmstudio:
             return "v1/chat/completions"
+        case .claude:
+            return "v1/messages"
         }
     }
     
@@ -224,6 +272,8 @@ public class LLMBridge: ObservableObject {
             return createOllamaChatRequest(content: content, model: model, image: image)
         case .lmstudio:
             return createLMStudioChatRequest(content: content, model: model, image: image)
+        case .claude:
+            return createClaudeChatRequest(content: content, model: model, image: image)
         }
     }
     
@@ -285,6 +335,47 @@ public class LLMBridge: ObservableObject {
         ]
     }
     
+    private func createClaudeChatRequest(content: String, model: String, image: PlatformImage?) -> [String: Any] {
+        var claudeMessages: [[String: Any]] = []
+        
+        for message in messages.dropLast() {
+            let role = message.isUser ? "user" : "assistant"
+            claudeMessages.append(["role": role, "content": message.content])
+        }
+        
+        var currentContent: [[String: Any]] = []
+        
+        if let userImage = image,
+           let imageBase64 = encodeImageToBase64(userImage) {
+            currentContent.append([
+                "type": "image",
+                "source": [
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": imageBase64
+                ]
+            ])
+        }
+        
+        currentContent.append([
+            "type": "text",
+            "text": content
+        ])
+        
+        claudeMessages.append([
+            "role": "user",
+            "content": currentContent
+        ])
+        
+        return [
+            "model": model,
+            "messages": claudeMessages,
+            "max_tokens": 4096,
+            "stream": true,
+            "temperature": 0.7
+        ]
+    }
+    
     private func processStream(request: URLRequest) async throws {
         let (asyncBytes, response) = try await urlSession.bytes(for: request)
         
@@ -318,7 +409,6 @@ public class LLMBridge: ObservableObject {
         if target == .lmstudio {
             print("LMStudio raw line: '\(line)'")
             
-            // LMStudio SSE format processing
             if line.hasPrefix("data: ") {
                 jsonLine = String(line.dropFirst(6)).trimmingCharacters(in: .whitespacesAndNewlines)
                 print("LMStudio extracted JSON: '\(jsonLine)'")
@@ -336,6 +426,26 @@ public class LLMBridge: ObservableObject {
             }
         }
         
+        if target == .claude {
+            print("Claude raw line: '\(line)'")
+            
+            if line.hasPrefix("data: ") {
+                jsonLine = String(line.dropFirst(6)).trimmingCharacters(in: .whitespacesAndNewlines)
+                print("Claude extracted JSON: '\(jsonLine)'")
+                
+                if jsonLine == "[DONE]" || jsonLine.isEmpty {
+                    print("Claude stream finished")
+                    return
+                }
+            } else if line.hasPrefix("event:") || line.hasPrefix(":") || line.isEmpty {
+                print("Claude skipping SSE metadata: '\(line)'")
+                return
+            } else if !line.hasPrefix("{") {
+                print("Claude skipping non-JSON line: '\(line)'")
+                return
+            }
+        }
+        
         guard !jsonLine.isEmpty,
               let data = jsonLine.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -348,6 +458,8 @@ public class LLMBridge: ObservableObject {
             await processOllamaStream(json)
         case .lmstudio:
             await processLMStudioStream(json)
+        case .claude:
+            await processClaudeStream(json)
         }
     }
     
@@ -383,6 +495,28 @@ public class LLMBridge: ObservableObject {
            finishReason == "stop" {
             print("LMStudio stream completed with finish_reason: stop")
             return
+        }
+    }
+    
+    private func processClaudeStream(_ json: [String: Any]) async {
+        print("Claude JSON: \(json)")
+        
+        if let type = json["type"] as? String {
+            switch type {
+            case "content_block_delta":
+                if let delta = json["delta"] as? [String: Any],
+                   let text = delta["text"] as? String {
+                    print("Claude content chunk: '\(text)'")
+                    tempResponse += text
+                    currentResponse = tempResponse
+                    print("Claude accumulated: '\(currentResponse)'")
+                }
+            case "message_stop":
+                print("Claude stream completed with message_stop")
+                return
+            default:
+                break
+            }
         }
     }
     
