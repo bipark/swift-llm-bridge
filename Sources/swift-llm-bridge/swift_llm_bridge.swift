@@ -20,6 +20,7 @@ public enum LLMTarget: Sendable {
     case ollama
     case lmstudio
     case claude
+    case openai
 }
 
 @available(iOS 15.0, macOS 12.0, *)
@@ -66,6 +67,8 @@ public class LLMBridge: ObservableObject {
             return "llama3.2"
         case .claude:
             return "claude-3-5-sonnet-20241022"
+        case .openai:
+            return "gpt-4"
         }
     }
     
@@ -86,6 +89,12 @@ public class LLMBridge: ObservableObject {
         if target == .claude {
             guard let url = URL(string: "https://api.anthropic.com") else {
                 fatalError("Invalid Claude API URL")
+            }
+            self.baseURL = url
+            self.port = 443
+        } else if target == .openai {
+            guard let url = URL(string: "https://api.openai.com") else {
+                fatalError("Invalid OpenAI API URL")
             }
             self.baseURL = url
             self.port = 443
@@ -120,6 +129,14 @@ public class LLMBridge: ObservableObject {
                 request.addValue("application/json", forHTTPHeaderField: "Content-Type")
             }
             
+            if target == .openai {
+                guard let key = apiKey else {
+                    throw NSError(domain: "LLMBridgeError", code: 401, userInfo: [NSLocalizedDescriptionKey: "OpenAI API key is required"])
+                }
+                request.addValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+                request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+            }
+            
             let (data, _) = try await urlSession.data(for: request)
             
             switch target {
@@ -135,6 +152,13 @@ public class LLMBridge: ObservableObject {
                 }
             case .claude:
                 return ["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229"]
+            case .openai:
+                if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let data = json["data"] as? [[String: Any]] {
+                    let availableModels = data.compactMap { $0["id"] as? String }
+                    return availableModels.isEmpty ? ["gpt-3.5-turbo", "gpt-4", "gpt-4-turbo-preview", "gpt-4-vision-preview"] : availableModels
+                }
+                return ["gpt-3.5-turbo", "gpt-4", "gpt-4-turbo-preview", "gpt-4-vision-preview"]
             }
             
             return [getDefaultModel]
@@ -183,6 +207,15 @@ public class LLMBridge: ObservableObject {
                     request.addValue("\(key)", forHTTPHeaderField: "x-api-key")
                     request.addValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
                     request.addValue("text/event-stream", forHTTPHeaderField: "Accept")
+                }
+                
+                if target == .openai {
+                    guard let key = apiKey else {
+                        throw NSError(domain: "LLMBridgeError", code: 401, userInfo: [NSLocalizedDescriptionKey: "OpenAI API key is required"])
+                    }
+                    request.addValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+                    request.addValue("text/event-stream", forHTTPHeaderField: "Accept")
+                    request.addValue("keep-alive", forHTTPHeaderField: "Connection")
                 }
                 
                 request.addValue("no-cache", forHTTPHeaderField: "Cache-Control")
@@ -252,6 +285,8 @@ public class LLMBridge: ObservableObject {
             return "v1/models"
         case .claude:
             return "v1/models"
+        case .openai:
+            return "v1/models"
         }
     }
     
@@ -263,6 +298,8 @@ public class LLMBridge: ObservableObject {
             return "v1/chat/completions"
         case .claude:
             return "v1/messages"
+        case .openai:
+            return "v1/chat/completions"
         }
     }
     
@@ -274,6 +311,8 @@ public class LLMBridge: ObservableObject {
             return createLMStudioChatRequest(content: content, model: model, image: image)
         case .claude:
             return createClaudeChatRequest(content: content, model: model, image: image)
+        case .openai:
+            return createOpenAIChatRequest(content: content, model: model, image: image)
         }
     }
     
@@ -376,6 +415,46 @@ public class LLMBridge: ObservableObject {
         ]
     }
     
+    private func createOpenAIChatRequest(content: String, model: String, image: PlatformImage?) -> [String: Any] {
+        var chatMessages: [[String: Any]] = []
+        
+        for message in messages.dropLast() {
+            let role = message.isUser ? "user" : "assistant"
+            chatMessages.append(["role": role, "content": message.content])
+        }
+        
+        var currentUserMessage: [String: Any] = [
+            "role": "user"
+        ]
+        
+        if let userImage = image,
+           let imageBase64 = encodeImageToBase64(userImage) {
+            let imageContent: [String: Any] = [
+                "type": "image_url",
+                "image_url": [
+                    "url": "data:image/jpeg;base64,\(imageBase64)"
+                ]
+            ]
+            let textContent: [String: Any] = [
+                "type": "text",
+                "text": content
+            ]
+            currentUserMessage["content"] = [textContent, imageContent]
+        } else {
+            currentUserMessage["content"] = content
+        }
+        
+        chatMessages.append(currentUserMessage)
+        
+        return [
+            "model": model,
+            "messages": chatMessages,
+            "stream": true,
+            "temperature": 0.7,
+            "max_tokens": 4096
+        ]
+    }
+    
     private func processStream(request: URLRequest) async throws {
         let (asyncBytes, response) = try await urlSession.bytes(for: request)
         
@@ -446,6 +525,26 @@ public class LLMBridge: ObservableObject {
             }
         }
         
+        if target == .openai {
+            print("OpenAI raw line: '\(line)'")
+            
+            if line.hasPrefix("data: ") {
+                jsonLine = String(line.dropFirst(6)).trimmingCharacters(in: .whitespacesAndNewlines)
+                print("OpenAI extracted JSON: '\(jsonLine)'")
+                
+                if jsonLine == "[DONE]" || jsonLine.isEmpty {
+                    print("OpenAI stream finished")
+                    return
+                }
+            } else if line.hasPrefix("event:") || line.hasPrefix(":") || line.isEmpty {
+                print("OpenAI skipping SSE metadata: '\(line)'")
+                return
+            } else if !line.hasPrefix("{") {
+                print("OpenAI skipping non-JSON line: '\(line)'")
+                return
+            }
+        }
+        
         guard !jsonLine.isEmpty,
               let data = jsonLine.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -460,6 +559,8 @@ public class LLMBridge: ObservableObject {
             await processLMStudioStream(json)
         case .claude:
             await processClaudeStream(json)
+        case .openai:
+            await processOpenAIChatStream(json)
         }
     }
     
@@ -517,6 +618,28 @@ public class LLMBridge: ObservableObject {
             default:
                 break
             }
+        }
+    }
+    
+    private func processOpenAIChatStream(_ json: [String: Any]) async {
+        print("OpenAI JSON: \(json)")
+        
+        if let choices = json["choices"] as? [[String: Any]],
+           let firstChoice = choices.first,
+           let delta = firstChoice["delta"] as? [String: Any],
+           let content = delta["content"] as? String {
+            print("OpenAI content chunk: '\(content)'")
+            tempResponse += content
+            currentResponse = tempResponse
+            print("OpenAI accumulated: '\(currentResponse)'")
+        }
+        
+        if let choices = json["choices"] as? [[String: Any]],
+           let firstChoice = choices.first,
+           let finishReason = firstChoice["finish_reason"] as? String,
+           finishReason == "stop" {
+            print("OpenAI stream completed with finish_reason: stop")
+            return
         }
     }
     

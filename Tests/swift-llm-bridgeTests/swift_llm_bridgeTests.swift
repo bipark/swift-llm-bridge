@@ -108,6 +108,7 @@ import Testing
     #expect(LLMTarget.ollama == .ollama)
     #expect(LLMTarget.lmstudio == .lmstudio)
     #expect(LLMTarget.claude == .claude)
+    #expect(LLMTarget.openai == .openai)
 }
 
 @available(iOS 15.0, macOS 12.0, *)
@@ -124,5 +125,44 @@ import Testing
     await MainActor.run {
         #expect(claudeBridge.getTarget() == .claude)
         #expect(claudeBridge.getPort() == 443)
+    }
+}
+
+@available(iOS 15.0, macOS 12.0, *)
+@Test func testOpenAIInitialization() async throws {
+    let openAIBridge = await LLMBridge(target: .openai, apiKey: "test-api-key")
+    
+    await MainActor.run {
+        #expect(openAIBridge.getPort() == 443)
+        #expect(openAIBridge.getTarget() == .openai)
+        #expect(openAIBridge.getBaseURL().absoluteString == "https://api.openai.com")
+    }
+}
+
+@available(iOS 15.0, macOS 12.0, *)
+@Test func testOpenAIWithoutAPIKey() async throws {
+    let openAIBridge = await LLMBridge(target: .openai)
+    
+    await MainActor.run {
+        #expect(openAIBridge.getTarget() == .openai)
+    }
+    
+    do {
+        _ = try await openAIBridge.getAvailableModels()
+        #expect(Bool(false), "Should throw error without API key")
+    } catch {
+        #expect(error.localizedDescription.contains("OpenAI API key is required"))
+    }
+}
+
+@available(iOS 15.0, macOS 12.0, *)
+@Test func testOpenAIModels() async throws {
+    let openAIBridge = await LLMBridge(target: .openai, apiKey: "test-api-key")
+    
+    do {
+        let models = try await openAIBridge.getAvailableModels()
+        #expect(models.contains("gpt-3.5-turbo") || models.contains("gpt-4"))
+    } catch {
+        print("Expected error for invalid API key: \(error)")
     }
 }

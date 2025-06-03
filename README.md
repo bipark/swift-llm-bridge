@@ -1,20 +1,21 @@
 # Swift LLM Bridge
 
-A Swift package for iOS and macOS that connects to Ollama, LMStudio, and Claude servers for interactive AI model conversations.
+A Swift package for iOS and macOS that connects to Ollama, LMStudio, Claude, and OpenAI servers for interactive AI model conversations.
 
 ## Features
 
 - ✅ Ollama server support
 - ✅ LMStudio server support  
 - ✅ Claude API support (Anthropic)
+- ✅ OpenAI API support
 - ✅ Real-time streaming responses
-- ✅ Image input support (Ollama & Claude)
+- ✅ Image input support (Ollama, Claude & OpenAI)
 - ✅ Conversation history management
 - ✅ iOS/macOS cross-platform support
 - ✅ SwiftUI ObservableObject support
 - ✅ Enhanced SSE (Server-Sent Events) handling
 - ✅ Debug logging for troubleshooting
-- ✅ API key authentication (Claude)
+- ✅ API key authentication (Claude & OpenAI)
 
 ## Installation
 
@@ -54,6 +55,12 @@ let claudeBridge = LLMBridge(
     target: .claude, 
     apiKey: "your-claude-api-key"
 )
+
+// Connect to OpenAI API
+let openAIBridge = LLMBridge(
+    target: .openai,
+    apiKey: "your-openai-api-key"
+)
 ```
 
 ### Getting Available Models
@@ -79,6 +86,17 @@ do {
 }
 ```
 
+#### OpenAI
+```swift
+do {
+    let models = try await openAIBridge.getAvailableModels()
+    print("OpenAI models: \(models)")
+    // Output: ["gpt-3.5-turbo", "gpt-4", "gpt-4-turbo-preview", "gpt-4-vision-preview", ...]
+} catch {
+    print("Failed to fetch OpenAI models: \(error)")
+}
+```
+
 ### Sending Messages
 
 #### Basic Text Messages
@@ -101,6 +119,17 @@ do {
         model: "claude-3-5-sonnet-20241022"
     )
     print("Claude response: \(response.content)")
+} catch {
+    print("Failed to send message: \(error)")
+}
+
+// OpenAI
+do {
+    let response = try await openAIBridge.sendMessage(
+        content: "Hello! How can you help me?",
+        model: "gpt-4"
+    )
+    print("OpenAI response: \(response.content)")
 } catch {
     print("Failed to send message: \(error)")
 }
@@ -146,6 +175,25 @@ do {
 #endif
 ```
 
+#### OpenAI (supports vision with GPT-4V models)
+```swift
+#if canImport(UIKit)
+import UIKit
+
+let image = UIImage(named: "example")
+do {
+    let response = try await openAIBridge.sendMessage(
+        content: "What do you see in this image?",
+        image: image,
+        model: "gpt-4-vision-preview"
+    )
+    print("OpenAI analysis: \(response.content)")
+} catch {
+    print("Failed to send message: \(error)")
+}
+#endif
+```
+
 ### Using with SwiftUI
 
 ```swift
@@ -165,6 +213,7 @@ struct ChatView: View {
                 Text("Ollama").tag(LLMTarget.ollama)
                 Text("LMStudio").tag(LLMTarget.lmstudio)
                 Text("Claude").tag(LLMTarget.claude)
+                Text("OpenAI").tag(LLMTarget.openai)
             }
             .pickerStyle(SegmentedPickerStyle())
             .padding()
@@ -172,6 +221,13 @@ struct ChatView: View {
             // API Key input for Claude
             if selectedTarget == .claude {
                 SecureField("Claude API Key", text: $apiKey)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                    .padding(.horizontal)
+            }
+            
+            // API Key input for OpenAI
+            if selectedTarget == .openai {
+                SecureField("OpenAI API Key", text: $apiKey)
                     .textFieldStyle(RoundedBorderTextFieldStyle())
                     .padding(.horizontal)
             }
@@ -204,7 +260,7 @@ struct ChatView: View {
                         inputText = ""
                     }
                 }
-                .disabled(inputText.isEmpty || bridge.isLoading || (selectedTarget == .claude && apiKey.isEmpty))
+                .disabled(inputText.isEmpty || bridge.isLoading || (selectedTarget == .claude && apiKey.isEmpty) || (selectedTarget == .openai && apiKey.isEmpty))
             }
             .padding()
         }
@@ -218,6 +274,8 @@ struct ChatView: View {
             return LLMBridge(baseURL: "http://localhost", port: 1234, target: .lmstudio)
         case .claude:
             return LLMBridge(target: .claude, apiKey: apiKey)
+        case .openai:
+            return LLMBridge(target: .openai, apiKey: apiKey)
         }
     }
 }
@@ -283,6 +341,14 @@ let claudeSession = bridge.createNewSession(
     target: .claude,
     apiKey: "your-api-key"
 )
+
+// Create OpenAI session with API key
+let openAISession = bridge.createNewSession(
+    baseURL: "",
+    port: 0,
+    target: .openai,
+    apiKey: "your-openai-api-key"
+)
 ```
 
 ### Conversation Management
@@ -305,6 +371,7 @@ print("Current response: \(bridge.currentResponse)")
 #### Initialization
 - `init(baseURL: String, port: Int, target: LLMTarget, apiKey: String?)`: Initialize with custom configuration
 - For Claude: `LLMBridge(target: .claude, apiKey: "your-api-key")`
+- For OpenAI: `LLMBridge(target: .openai, apiKey: "your-api-key")`
 
 #### Main Methods
 - `getAvailableModels() async throws -> [String]`: Returns available model list
@@ -323,6 +390,7 @@ print("Current response: \(bridge.currentResponse)")
 - `.ollama`: Ollama server
 - `.lmstudio`: LMStudio server
 - `.claude`: Claude API (Anthropic)
+- `.openai`: OpenAI API
 
 ### Message Structure
 - `id: UUID`: Unique identifier
@@ -352,6 +420,13 @@ print("Current response: \(bridge.currentResponse)")
 - **OpenAI Compatible**: Uses OpenAI-style API format
 - **No API Key**: No authentication required
 
+### OpenAI
+- **Models**: gpt-3.5-turbo, gpt-4, gpt-4-turbo-preview, gpt-4-vision-preview, and more
+- **Authentication**: Requires API key from OpenAI
+- **Vision**: GPT-4V models support image analysis
+- **Streaming**: Real-time response streaming
+- **Rate Limits**: Follows OpenAI's API rate limits
+
 ## Error Handling
 
 ```swift
@@ -370,6 +445,13 @@ do {
 ```
 
 ## Recent Updates
+
+### Version 1.2.0
+- ✅ **OpenAI API Integration**: Full support for OpenAI's GPT models
+- ✅ **Vision Support Enhancement**: Image analysis with OpenAI GPT-4V models
+- ✅ **Four-Platform Support**: Complete integration of Ollama, LMStudio, Claude, and OpenAI
+- ✅ **Unified API**: Seamless switching between all four LLM platforms
+- ✅ **Enhanced Testing**: Comprehensive test coverage for OpenAI functionality
 
 ### Version 1.1.0
 - ✅ **Claude API Integration**: Full support for Anthropic's Claude models
@@ -401,10 +483,19 @@ When troubleshooting connection issues, the library now provides detailed consol
 - Swift 6.1+
 - Xcode 15.0+
 - For Claude: Valid Anthropic API key
+- For OpenAI: Valid OpenAI API key
 
 ## Getting Claude API Key
 
 1. Visit [Anthropic Console](https://console.anthropic.com/)
+2. Create an account or sign in
+3. Navigate to API Keys section
+4. Generate a new API key
+5. Keep your API key secure and never commit it to version control
+
+## Getting OpenAI API Key
+
+1. Visit [OpenAI Platform](https://platform.openai.com/)
 2. Create an account or sign in
 3. Navigate to API Keys section
 4. Generate a new API key
