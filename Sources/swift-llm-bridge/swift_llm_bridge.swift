@@ -124,7 +124,7 @@ public class LLMBridge: ObservableObject {
                 guard let key = apiKey else {
                     throw NSError(domain: "LLMBridgeError", code: 401, userInfo: [NSLocalizedDescriptionKey: "Claude API key is required"])
                 }
-                request.addValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+                request.addValue("\(key)", forHTTPHeaderField: "x-api-key")
                 request.addValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
                 request.addValue("application/json", forHTTPHeaderField: "Content-Type")
             }
@@ -151,7 +151,21 @@ public class LLMBridge: ObservableObject {
                     return data.compactMap { $0["id"] as? String }
                 }
             case .claude:
-                return ["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229"]
+                if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let data = json["data"] as? [[String: Any]] {
+                    return data.compactMap { $0["id"] as? String }
+                }
+                // 백업으로 알려진 모델 목록 반환
+                return [
+                    "claude-opus-4-20250514",
+                    "claude-sonnet-4-20250514", 
+                    "claude-3-7-sonnet-20250219",
+                    "claude-3-5-sonnet-20241022",
+                    "claude-3-5-haiku-20241022",
+                    "claude-3-opus-20240229",
+                    "claude-3-sonnet-20240229",
+                    "claude-3-haiku-20240307"
+                ]
             case .openai:
                 if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let data = json["data"] as? [[String: Any]] {
@@ -164,6 +178,20 @@ public class LLMBridge: ObservableObject {
             return [getDefaultModel]
             
         } catch {
+            // Claude의 경우 API 호출이 실패하면 알려진 모델 목록을 백업으로 반환
+            if target == .claude {
+                return [
+                    "claude-opus-4-20250514",
+                    "claude-sonnet-4-20250514", 
+                    "claude-3-7-sonnet-20250219",
+                    "claude-3-5-sonnet-20241022",
+                    "claude-3-5-haiku-20241022",
+                    "claude-3-opus-20240229",
+                    "claude-3-sonnet-20240229",
+                    "claude-3-haiku-20240307"
+                ]
+            }
+            
             errorMessage = "Failed to fetch model list: \(error.localizedDescription)"
             throw error
         }
@@ -256,6 +284,113 @@ public class LLMBridge: ObservableObject {
         await generationTask?.value
         
         return aiMessage ?? Message(content: "Failed to generate response.", isUser: false, image: nil, timestamp: Date())
+    }
+    
+    public func sendMessageStream(content: String, image: PlatformImage? = nil, model: String? = nil) -> AsyncThrowingStream<String, Error> {
+        return AsyncThrowingStream { continuation in
+            Task { @MainActor in
+                isLoading = true
+                errorMessage = nil
+                tempResponse = ""
+                currentResponse = ""
+                
+                let userMessage = Message(content: content, isUser: true, image: image)
+                messages.append(userMessage)
+                
+                generationTask?.cancel()
+                
+                let selectedModel = model ?? getDefaultModel
+                
+                generationTask = Task {
+                    defer { 
+                        Task { @MainActor in
+                            isLoading = false
+                        }
+                    }
+                    
+                    do {
+                        let endpoint = getChatEndpoint()
+                        let requestURL = baseURL.appendingPathComponent(endpoint)
+                        var request = URLRequest(url: requestURL)
+                        request.httpMethod = "POST"
+                        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+                        
+                        if target == .lmstudio {
+                            request.addValue("text/event-stream", forHTTPHeaderField: "Accept")
+                            request.addValue("keep-alive", forHTTPHeaderField: "Connection")
+                        } else {
+                            request.addValue("application/json", forHTTPHeaderField: "Accept")
+                        }
+                        
+                        if target == .claude {
+                            guard let key = apiKey else {
+                                throw NSError(domain: "LLMBridgeError", code: 401, userInfo: [NSLocalizedDescriptionKey: "Claude API key is required"])
+                            }
+                            request.addValue("\(key)", forHTTPHeaderField: "x-api-key")
+                            request.addValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+                            request.addValue("text/event-stream", forHTTPHeaderField: "Accept")
+                        }
+                        
+                        if target == .openai {
+                            guard let key = apiKey else {
+                                throw NSError(domain: "LLMBridgeError", code: 401, userInfo: [NSLocalizedDescriptionKey: "OpenAI API key is required"])
+                            }
+                            request.addValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+                            request.addValue("text/event-stream", forHTTPHeaderField: "Accept")
+                            request.addValue("keep-alive", forHTTPHeaderField: "Connection")
+                        }
+                        
+                        request.addValue("no-cache", forHTTPHeaderField: "Cache-Control")
+                        request.timeoutInterval = 300.0
+                        
+                        let requestData = try createChatRequest(content: content, model: selectedModel, image: image)
+                        request.httpBody = try JSONSerialization.data(withJSONObject: requestData)
+                        
+                        print("Request URL: \(requestURL)")
+                        print("Request headers: \(request.allHTTPHeaderFields ?? [:])")
+                        print("Request body: \(String(data: request.httpBody ?? Data(), encoding: .utf8) ?? "")")
+                        
+                        try await self.processStreamWithContinuation(request: request, continuation: continuation)
+                        
+                        if !tempResponse.isEmpty {
+                            let message = Message(content: tempResponse, isUser: false, image: nil, timestamp: Date())
+                            await MainActor.run {
+                                messages.append(message)
+                            }
+                            
+                            tempResponse = ""
+                            currentResponse = ""
+                        }
+                        
+                        continuation.finish()
+                        
+                    } catch {
+                        await MainActor.run {
+                            errorMessage = error.localizedDescription
+                        }
+                        
+                        if !Task.isCancelled && !tempResponse.isEmpty {
+                            let message = Message(content: tempResponse + "\nAn error occurred.", isUser: false, image: nil, timestamp: Date())
+                            await MainActor.run {
+                                messages.append(message)
+                            }
+                            
+                            tempResponse = ""
+                            currentResponse = ""
+                        }
+                        
+                        continuation.finish(throwing: error)
+                    }
+                }
+            }
+            
+            continuation.onTermination = { @Sendable _ in
+                Task { @MainActor in
+                    self.generationTask?.cancel()
+                    self.isLoading = false
+                }
+            }
+        }
     }
     
     public func cancelGeneration() {
@@ -639,6 +774,171 @@ public class LLMBridge: ObservableObject {
            let finishReason = firstChoice["finish_reason"] as? String,
            finishReason == "stop" {
             print("OpenAI stream completed with finish_reason: stop")
+            return
+        }
+    }
+    
+    private func processStreamWithContinuation(request: URLRequest, continuation: AsyncThrowingStream<String, Error>.Continuation) async throws {
+        let (asyncBytes, response) = try await urlSession.bytes(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw URLError(.badServerResponse)
+        }
+        
+        guard httpResponse.statusCode == 200 else {
+            let errorMessage = "Server error: HTTP \(httpResponse.statusCode)"
+            throw NSError(domain: "LLMBridgeError", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: errorMessage])
+        }
+        
+        do {
+            for try await line in asyncBytes.lines {
+                if Task.isCancelled { break }
+                
+                if line.isEmpty { continue }
+                
+                await processStreamLineWithContinuation(line, continuation: continuation)
+            }
+        } catch {
+            if !Task.isCancelled {
+                throw error
+            }
+        }
+    }
+    
+    private func processStreamLineWithContinuation(_ line: String, continuation: AsyncThrowingStream<String, Error>.Continuation) async {
+        var jsonLine = line
+        
+        if target == .lmstudio {
+            if line.hasPrefix("data: ") {
+                jsonLine = String(line.dropFirst(6)).trimmingCharacters(in: .whitespacesAndNewlines)
+                
+                if jsonLine == "[DONE]" || jsonLine.isEmpty { 
+                    return 
+                }
+            } else if line.hasPrefix("event:") || line.hasPrefix(":") || line.isEmpty {
+                return
+            } else if !line.hasPrefix("{") {
+                return
+            }
+        }
+        
+        if target == .claude {
+            if line.hasPrefix("data: ") {
+                jsonLine = String(line.dropFirst(6)).trimmingCharacters(in: .whitespacesAndNewlines)
+                
+                if jsonLine == "[DONE]" || jsonLine.isEmpty {
+                    return
+                }
+            } else if line.hasPrefix("event:") || line.hasPrefix(":") || line.isEmpty {
+                return
+            } else if !line.hasPrefix("{") {
+                return
+            }
+        }
+        
+        if target == .openai {
+            if line.hasPrefix("data: ") {
+                jsonLine = String(line.dropFirst(6)).trimmingCharacters(in: .whitespacesAndNewlines)
+                
+                if jsonLine == "[DONE]" || jsonLine.isEmpty {
+                    return
+                }
+            } else if line.hasPrefix("event:") || line.hasPrefix(":") || line.isEmpty {
+                return
+            } else if !line.hasPrefix("{") {
+                return
+            }
+        }
+        
+        guard !jsonLine.isEmpty,
+              let data = jsonLine.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return
+        }
+        
+        switch target {
+        case .ollama:
+            await processOllamaStreamWithContinuation(json, continuation: continuation)
+        case .lmstudio:
+            await processLMStudioStreamWithContinuation(json, continuation: continuation)
+        case .claude:
+            await processClaudeStreamWithContinuation(json, continuation: continuation)
+        case .openai:
+            await processOpenAIStreamWithContinuation(json, continuation: continuation)
+        }
+    }
+    
+    private func processOllamaStreamWithContinuation(_ json: [String: Any], continuation: AsyncThrowingStream<String, Error>.Continuation) async {
+        if let message = json["message"] as? [String: Any],
+           let content = message["content"] as? String {
+            tempResponse += content
+            await MainActor.run {
+                currentResponse = tempResponse
+            }
+            continuation.yield(content)
+        }
+        
+        if let done = json["done"] as? Bool, done {
+            return
+        }
+    }
+    
+    private func processLMStudioStreamWithContinuation(_ json: [String: Any], continuation: AsyncThrowingStream<String, Error>.Continuation) async {
+        if let choices = json["choices"] as? [[String: Any]],
+           let firstChoice = choices.first,
+           let delta = firstChoice["delta"] as? [String: Any],
+           let content = delta["content"] as? String {
+            tempResponse += content
+            await MainActor.run {
+                currentResponse = tempResponse
+            }
+            continuation.yield(content)
+        }
+        
+        if let choices = json["choices"] as? [[String: Any]],
+           let firstChoice = choices.first,
+           let finishReason = firstChoice["finish_reason"] as? String,
+           finishReason == "stop" {
+            return
+        }
+    }
+    
+    private func processClaudeStreamWithContinuation(_ json: [String: Any], continuation: AsyncThrowingStream<String, Error>.Continuation) async {
+        if let type = json["type"] as? String {
+            switch type {
+            case "content_block_delta":
+                if let delta = json["delta"] as? [String: Any],
+                   let text = delta["text"] as? String {
+                    tempResponse += text
+                    await MainActor.run {
+                        currentResponse = tempResponse
+                    }
+                    continuation.yield(text)
+                }
+            case "message_stop":
+                return
+            default:
+                break
+            }
+        }
+    }
+    
+    private func processOpenAIStreamWithContinuation(_ json: [String: Any], continuation: AsyncThrowingStream<String, Error>.Continuation) async {
+        if let choices = json["choices"] as? [[String: Any]],
+           let firstChoice = choices.first,
+           let delta = firstChoice["delta"] as? [String: Any],
+           let content = delta["content"] as? String {
+            tempResponse += content
+            await MainActor.run {
+                currentResponse = tempResponse
+            }
+            continuation.yield(content)
+        }
+        
+        if let choices = json["choices"] as? [[String: Any]],
+           let firstChoice = choices.first,
+           let finishReason = firstChoice["finish_reason"] as? String,
+           finishReason == "stop" {
             return
         }
     }
