@@ -446,6 +446,22 @@ do {
 
 ## Recent Updates
 
+### Version 1.3.0
+- ✅ **Claude Model Update**: Added support for Claude-3 Opus, Sonnet, and Haiku models
+  - claude-opus-4-20250514
+  - claude-sonnet-4-20250514
+  - claude-3-7-sonnet-20250219
+  - claude-3-5-sonnet-20241022
+  - claude-3-5-haiku-20241022
+  - claude-3-opus-20240229
+  - claude-3-sonnet-20240229
+  - claude-3-haiku-20240307
+- ✅ **Image Processing Enhancement**: Optimized image resizing and compression
+- ✅ **Stream Processing Improvement**: Optimized streaming logic for each platform
+- ✅ **Debug Logging Enhancement**: Added detailed request/response logging
+- ✅ **Memory Management Optimization**: Optimized memory usage for image processing
+- ✅ **Error Handling Enhancement**: Detailed error messages for each platform
+
 ### Version 1.2.0
 - ✅ **OpenAI API Integration**: Full support for OpenAI's GPT models
 - ✅ **Vision Support Enhancement**: Image analysis with OpenAI GPT-4V models
