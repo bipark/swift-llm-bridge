@@ -113,16 +113,17 @@ public class LLMBridge: ObservableObject {
         return LLMBridge(baseURL: baseURL, port: port, target: target, apiKey: apiKey)
     }
     
-    public func getAvailableModels() async throws -> [String] {
+    public func getAvailableModels() async -> [String] {
         let endpoint = getModelsEndpoint()
         let requestURL = baseURL.appendingPathComponent(endpoint)
         
         do {
             var request = URLRequest(url: requestURL)
+            request.timeoutInterval = 10.0  
             
             if target == .claude {
                 guard let key = apiKey else {
-                    throw NSError(domain: "LLMBridgeError", code: 401, userInfo: [NSLocalizedDescriptionKey: "Claude API key is required"])
+                    return []
                 }
                 request.addValue("\(key)", forHTTPHeaderField: "x-api-key")
                 request.addValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
@@ -131,72 +132,48 @@ public class LLMBridge: ObservableObject {
             
             if target == .openai {
                 guard let key = apiKey else {
-                    throw NSError(domain: "LLMBridgeError", code: 401, userInfo: [NSLocalizedDescriptionKey: "OpenAI API key is required"])
+                    return []
                 }
                 request.addValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
                 request.addValue("application/json", forHTTPHeaderField: "Content-Type")
             }
             
-            let (data, _) = try await urlSession.data(for: request)
+            let (data, _) = try await URLSession.shared.data(for: request)
+
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return []
+            }
             
             switch target {
             case .ollama:
-                if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let models = json["models"] as? [[String: Any]] {
-                    return models.compactMap { $0["name"] as? String }
+                if let models = json["models"] as? [[String: Any]] {
+                    let modelNames = models.compactMap { $0["name"] as? String }
+                    return modelNames
                 }
             case .lmstudio:
-                if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let data = json["data"] as? [[String: Any]] {
-                    return data.compactMap { $0["id"] as? String }
+                if let data = json["data"] as? [[String: Any]] {
+                    let modelIds = data.compactMap { $0["id"] as? String }
+                    return modelIds
                 }
             case .claude:
-                if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let data = json["data"] as? [[String: Any]] {
-                    return data.compactMap { $0["id"] as? String }
+                if let data = json["data"] as? [[String: Any]] {
+                    let modelIds = data.compactMap { $0["id"] as? String }
+                    return modelIds
                 }
-                // 백업으로 알려진 모델 목록 반환
-                return [
-                    "claude-opus-4-20250514",
-                    "claude-sonnet-4-20250514", 
-                    "claude-3-7-sonnet-20250219",
-                    "claude-3-5-sonnet-20241022",
-                    "claude-3-5-haiku-20241022",
-                    "claude-3-opus-20240229",
-                    "claude-3-sonnet-20240229",
-                    "claude-3-haiku-20240307"
-                ]
             case .openai:
-                if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let data = json["data"] as? [[String: Any]] {
-                    let availableModels = data.compactMap { $0["id"] as? String }
-                    return availableModels.isEmpty ? ["gpt-3.5-turbo", "gpt-4", "gpt-4-turbo-preview", "gpt-4-vision-preview"] : availableModels
+                if let data = json["data"] as? [[String: Any]] {
+                    let modelIds = data.compactMap { $0["id"] as? String }
+                    return modelIds
                 }
-                return ["gpt-3.5-turbo", "gpt-4", "gpt-4-turbo-preview", "gpt-4-vision-preview"]
             }
             
-            return [getDefaultModel]
+            return []
             
         } catch {
-            // Claude의 경우 API 호출이 실패하면 알려진 모델 목록을 백업으로 반환
-            if target == .claude {
-                return [
-                    "claude-opus-4-20250514",
-                    "claude-sonnet-4-20250514", 
-                    "claude-3-7-sonnet-20250219",
-                    "claude-3-5-sonnet-20241022",
-                    "claude-3-5-haiku-20241022",
-                    "claude-3-opus-20240229",
-                    "claude-3-sonnet-20240229",
-                    "claude-3-haiku-20240307"
-                ]
-            }
-            
-            errorMessage = "Failed to fetch model list: \(error.localizedDescription)"
-            throw error
+            return []
         }
     }
-    
+        
     public func sendMessage(content: String, image: PlatformImage? = nil, model: String? = nil) async throws -> Message {
         isLoading = true
         errorMessage = nil
